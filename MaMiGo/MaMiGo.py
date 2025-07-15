@@ -1,19 +1,19 @@
 import sys
-
 from PyQt6.QtWidgets import *
-from PyQt6.QtGui import QFont, QPixmap, QPalette, QBrush, QColor, QIcon
+from PyQt6.QtGui import QFont, QPixmap, QPalette, QBrush, QIcon
 from PyQt6.QtCore import Qt, QSize
 import os, shutil
-from Database.database import User, Contact, engine
+from Database.database import User, Contact, Message, engine, session
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy import or_
 import qtawesome as qta
-
 
 
 
 class LoginWindow(QWidget):
     def __init__(self):
         super().__init__()
+        self.session = get_session()
         self.setWindowTitle("SIGN IN")
         self.setFixedSize(1000, 700)
         self.setup_ui()
@@ -151,16 +151,15 @@ class LoginWindow(QWidget):
     def authenticate(self):
         username = self.username_input.text()
         password = self.password_input.text()
-
-        if not username or not password:
+        if not username or not password :
             QMessageBox.warning(self, "error", "please complete the fields.")
             return
-        user = session.query(User).filter_by(username = username, password = password).one_or_none()
+        user = self.session.query(User).filter_by(username = username, password = password).one_or_none()
         if user != None :
-            print("OK!")
             self.open_main_window(user)
         else:
             QMessageBox.critical(self, "error", "there is no one with this username and password!")
+
     def toggle_password_visibility(self, state):
         if state == 2 :
             self.password_input.setEchoMode(QLineEdit.EchoMode.Normal)
@@ -180,7 +179,7 @@ class LoginWindow(QWidget):
 class SignupWindow(QWidget):
     def __init__(self):
         super().__init__()
-        #self.db = db
+        self.session = get_session()
         self.setWindowTitle("SIGN UP")
         self.setFixedSize(1000, 700)
         self.setup_ui()
@@ -383,12 +382,11 @@ class SignupWindow(QWidget):
         if password != re_password:
             QMessageBox.warning(self, "error", "completing the re_password field is required.")
             return
-
         profile_photo_path = os.getcwd()
         profile_photo_path = profile_photo_path + "/Appearance_structure/pictures/base_profile.png"
         new_user = User(phone = phone, username = username, password = password, bio = "(empty)", profile_image = profile_photo_path)
-        session.add(new_user)
-        session.commit()
+        self.session.add(new_user)
+        self.session.commit()
         if new_user :
             QMessageBox.information(self, "congratulations", "your account created successfully.")
             self.close()
@@ -409,12 +407,17 @@ class SignupWindow(QWidget):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, user):
+    def __init__(self, user) :
         super().__init__()
         self.user = user
+        self.session = get_session()
+        self.contacts = session.query(Contact).filter_by(user_id=self.user.id).all()
+        self.current_contact = None
+        self.last_message_id = 0
         self.setWindowTitle("MaMiGo")
         self.setGeometry(275, 50, 1000, 800)
         self.setup_ui()
+        self.load_contacts()
 
     def setup_ui(self):
 #######CENTERAL-WIDGET#######
@@ -458,9 +461,9 @@ class MainWindow(QMainWindow):
         options_layout.setContentsMargins(15, 0, 15, 0)
         options_layout.setSpacing(10)
 
-        search_input = QLineEdit()
-        search_input.setPlaceholderText("Search...")
-        search_input.setStyleSheet("""
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText("Search...")
+        self.search_input.setStyleSheet("""
                     QLineEdit {
                         background-color: #f0f2f5;
                         border-radius: 15px;
@@ -469,6 +472,8 @@ class MainWindow(QMainWindow):
                         border: 1px solid #d8dce6;
                     }
                 """)
+        self.search_input.textChanged.connect(self.find_contacts)
+
         settings_icon = qta.icon("mdi.cog", color="black")
         settings_button = QPushButton()
         settings_button.setIcon(settings_icon)
@@ -487,6 +492,7 @@ class MainWindow(QMainWindow):
                             background-color: #1c638e;
                         }
                     """)
+        settings_button.clicked.connect(self.open_settings)
 
         new_contact_button = QPushButton()
         new_contact_button.setIcon(QIcon.fromTheme("contact-new"))
@@ -505,8 +511,9 @@ class MainWindow(QMainWindow):
                             background-color: #1c638e;
                     }
                 """)
+        new_contact_button.clicked.connect(self.open_add_contact)
 
-        options_layout.addWidget(search_input)
+        options_layout.addWidget(self.search_input)
         options_layout.addWidget(settings_button)
         options_layout.addWidget(new_contact_button)
         header_layout.addLayout(profile_layout)
@@ -527,6 +534,7 @@ class MainWindow(QMainWindow):
                         background-color: #e6e6e6;
                     }
                 """)
+        self.contacts_list.itemClicked.connect(self.contact_selected)
 
         sidebar_layout.addWidget(sidebar_header)
         sidebar_layout.addWidget(self.contacts_list)
@@ -548,7 +556,6 @@ class MainWindow(QMainWindow):
 
         self.contact_avatar = QPushButton()
         self.contact_avatar.setIconSize(QSize(50, 50))
-        print(self.user.profile_image)
         self.contact_avatar.setIcon(QIcon(self.user.profile_image))
         self.contact_avatar.setStyleSheet("border-radius: 25px; border: none")
 
@@ -592,20 +599,6 @@ class MainWindow(QMainWindow):
         message_layout = QHBoxLayout(message_input_widget)
         message_layout.setContentsMargins(15, 10, 15, 10)
 
-        attach_button = QPushButton()
-        attach_button.setIcon(QIcon.fromTheme("mail-attachment"))
-        attach_button.setFixedSize(40, 40)
-        attach_button.setStyleSheet("""
-                                    QPushButton {
-                                        background-color: #e9ecef;
-                                        border-radius: 20px;
-                                        border: none;
-                                    }
-                                    QPushButton:pressed {
-                                            background-color: #dee2e6;
-                                    }
-                                """)
-
         self.message_input = QLineEdit()
         self.message_input.setPlaceholderText("Write a message...")
         self.message_input.setStyleSheet("""
@@ -634,8 +627,8 @@ class MainWindow(QMainWindow):
                             background-color: #1c638e;
                     }
                 """)
+        send_button.clicked.connect(self.send_message)
 
-        message_layout.addWidget(attach_button)
         message_layout.addWidget(self.message_input)
         message_layout.addWidget(send_button)
         chat_area_layout.addWidget(self.chat_display)
@@ -645,8 +638,300 @@ class MainWindow(QMainWindow):
         main_layout.addWidget(self.sidebar)
         main_layout.addWidget(self.main_area)
 
+    def load_contacts(self):
+        self.contacts_list.clear()
+        for contact in self.contacts:
+            item = QListWidgetItem()
+            widget = self.create_contact_widget(contact.username, "online")
+            item.setSizeHint(widget.sizeHint())
+            item.setData(Qt.ItemDataRole.UserRole, contact.id)
+            self.contacts_list.addItem(item)
+            self.contacts_list.setItemWidget(item, widget)
+        if self.contacts_list.count() > 0 :
+            self.contacts_list.setCurrentRow(0)
+            self.contact_selected(self.contacts_list.item(0))
+
+    def create_contact_widget(self, name, status):
+        widget = QWidget()
+
+        layout = QHBoxLayout(widget)
+        layout.setContentsMargins(15, 10, 15, 10)
+
+        profile_avatar = QLabel()
+        pixmap = QPixmap(self.user.profile_image)
+        profile_avatar.setPixmap(pixmap)
+        profile_avatar.setScaledContents(True)
+        profile_avatar.setFixedSize(50, 50)
+        profile_avatar.setStyleSheet("border-radius: 25px; border: none;")
+
+        info_widget = QWidget()
+        info_layout = QVBoxLayout(info_widget)
+        info_layout.setContentsMargins(10, 0, 0, 0)
+
+        name_label = QLabel(name)
+        name_label.setFont(QFont("Arial", 12, QFont.Weight.Bold))
+
+        status_label = QLabel(status)
+        status_label.setFont(QFont("Arial", 9))
+        status_label.setStyleSheet("color: #777;")
+
+        info_layout.addWidget(name_label)
+        info_layout.addWidget(status_label)
+        info_layout.addStretch()
+        layout.addWidget(profile_avatar)
+        layout.addWidget(info_widget, 1)
+        return widget
+
+    def contact_selected(self, item):
+        contact_id = item.data(Qt.ItemDataRole.UserRole)
+        self.current_contact = self.session.query(Contact).filter_by(id=contact_id).first()
+        if self.current_contact:
+            self.contact_name.setText(self.current_contact.username)
+            base_profile = os.getcwd()
+            base_profile = base_profile + "/Appearance_structure/pictures/base_profile.png"
+            self.contact_avatar.setIconSize(QSize(50, 50))
+            self.contact_avatar.setIcon(QIcon(base_profile))
+            self.contact_avatar.setStyleSheet("border-radius: 25px; border: none")
+        self.load_chat_history()
+
+    def load_chat_history(self):
+        if not self.current_contact :
+            return
+        self.chat_display.clear()
+        self.last_message_id = 0
+        messages = session.query(Message).filter(or_((Message.send_id == self.user.id) & (Message.receive_id == self.current_contact.id), (Message.send_id == self.current_contact.id) & (Message.receive_id == self.user.id)))
+        for message in messages:
+            send_id = message.send_id
+            letter = message.message
+            if send_id == self.user.id :
+                direction = "outgoing"
+            else :
+                direction = "incoming"
+            self.add_message(direction, letter)
+            if message.id > self.last_message_id:
+                self.last_message_id = message.id
+
+    def add_message(self, direction, text):
+        if direction == "outgoing":
+            style = """
+                background-color: #dcf8c6;
+                border-radius: 10px;
+                padding: 10px;
+                margin: 5px 50px 5px 100px;
+            """
+            alignment = Qt.AlignmentFlag.AlignRight
+        else:
+            style = """
+                background-color: rgba(255, 255, 255, 0.85);
+                border-radius: 10px;
+                padding: 10px;
+                margin: 5px 100px 5px 50px;
+                border: 1px solid rgba(224, 224, 224, 0.7);
+            """
+            alignment = Qt.AlignmentFlag.AlignLeft
+        html = f"""
+        <div style='{style}'>
+            <p style='margin:0;'>{text}</p>
+            <p style='margin:0; text-align:right; font-size:9px; color:#777;'>12:30 PM</p>
+        </div>
+        """
+        self.chat_display.append(html)
+        self.chat_display.setAlignment(alignment)
+        scroll_bar = self.chat_display.verticalScrollBar()
+        scroll_bar.setValue(scroll_bar.maximum())
+
+    def send_message(self):
+        message = self.message_input.text()
+        if message and self.current_contact :
+            new_message = Message(send_id = self.user.id, receive_id = self.current_contact.id, message = message)
+            self.session.add(new_message)
+            self.session.commit()
+            self.add_message("outgoing", message)
+            self.message_input.clear()
+            self.last_message_id = new_message.id
+
+    def find_contacts(self, text):
+        for i in range(self.contacts_list.count()):
+            item = self.contacts_list.item(i)
+            widget = self.contacts_list.itemWidget(item)
+            name_label = widget.layout().itemAt(1).widget().layout().itemAt(0).widget()
+            item.setHidden(text.lower() not in name_label.text().lower())
+
+    def open_add_contact(self):
+        dialog = AddContactDialog(self.user)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.load_contacts()
+
+    def open_settings(self):
+        dialog = SettingsDialog(self.user)
+        dialog.exec()
+
+    def check_new_messages(self):
+        if not self.current_contact :
+            return
+        print("hi")
+        messages = self.session.query(Message).filter(or_((Message.receive_id == self.user.id) & (Message.send_id == self.current_contact.id) & (Message.id > self.last_message_id))).all()
+        for message in messages :
+            self.add_message("incoming", message.message)
+            self.last_message_id = message.id
 
 
+class AddContactDialog(QDialog):
+    def __init__(self, user):
+        super().__init__()
+        self.session = get_session()
+        self.user = user
+        self.setWindowTitle("add new contact")
+        self.setFixedSize(200, 100)
+        self.setup_ui()
+
+    def setup_ui(self):
+        back_photo_path = os.getcwd()
+        back_photo_path = back_photo_path + "/Appearance_structure/pictures/back_intro.jpg"
+        self.set_background(back_photo_path)
+        layout = QVBoxLayout()
+
+        self.username_input = QLineEdit()
+        self.username_input.setPlaceholderText("enter username")
+
+        add_button = QPushButton("Add Contact")
+        add_button.clicked.connect(self.add_contact)
+
+        layout.addWidget(QLabel("Enter username of the contact :"))
+        layout.addWidget(self.username_input)
+        layout.addWidget(add_button)
+        self.setLayout(layout)
+
+    def add_contact(self):
+        username = self.username_input.text()
+        if not username :
+            QMessageBox.warning(self, "Error", "please enter username")
+            return
+        profile_photo_path = os.getcwd()
+        profile_photo_path = profile_photo_path + "/Appearance_structure/pictures/base_profile.png"
+        user = session.query(User).filter_by(username=username).one_or_none()
+        if user == None :
+            QMessageBox.critical(self, "Error", "user not found")
+            return
+        new_contact = Contact(phone = user.phone, username = user.username, password = user.password, bio = user.bio, profile_image = profile_photo_path, user_id = self.user.id)
+        self.session.add(new_contact)
+        self.session.commit()
+        contact_for_user = Contact(phone = self.user.phone, username = self.user.username, password = self.user.password, bio = self.user.bio, profile_image = self.user.profile_image, user_id = user.id)
+        contact = session.query(Contact).filter_by(username = username).one_or_none()
+        self.session.add(contact_for_user)
+        self.session.commit()
+        if contact != None :
+            QMessageBox.information(self, "Success", "contact added successfully")
+            self.accept()
+        else:
+            QMessageBox.critical(self, "Error", "something wrong to add this user to your contacts")
+
+    def set_background(self, image_path):
+        if os.path.exists(image_path):
+            palette = QPalette()
+            pixmap = QPixmap(image_path)
+            pixmap = pixmap.scaled(self.size(), Qt.AspectRatioMode.IgnoreAspectRatio)
+            palette.setBrush(QPalette.ColorRole.Window, QBrush(pixmap))
+            self.setPalette(palette)
+        else:
+            print(f"⚠️ Image not found: {image_path}")
+            self.setStyleSheet("background-color: #2c3e50;")
+
+
+class SettingsDialog(QDialog):
+    def __init__(self, user):
+        super().__init__()
+        self.session = get_session()
+        self.user = user
+        self.setWindowTitle("settings")
+        self.setFixedSize(500, 500)
+        self.setup_ui()
+
+    def setup_ui(self):
+        layout = QVBoxLayout()
+
+        form_layout = QFormLayout()
+
+        self.password_input = QLineEdit()
+        self.username_input = QLineEdit(self.user)
+
+        self.phone_input = QLineEdit(self.user[2])
+
+        self.password_input = QLineEdit()
+        self.password_input.setPlaceholderText("New password")
+        self.password_input.setEchoMode(QLineEdit.EchoMode.Password)
+
+        self.confirm_password_input = QLineEdit()
+        self.confirm_password_input.setPlaceholderText("Confirm new password")
+        self.confirm_password_input.setEchoMode(QLineEdit.EchoMode.Password)
+
+        form_layout.addRow("Username:", self.username_input)
+        form_layout.addRow("Phone:", self.phone_input)
+        form_layout.addRow("New Password:", self.password_input)
+        form_layout.addRow("Confirm Password:", self.confirm_password_input)
+
+        # دکمه‌های تغییر تصویر
+        buttons_layout = QHBoxLayout()
+
+        change_picture_button = QPushButton("Change Profile Picture")
+        change_picture_button.clicked.connect(self.change_profile_image)
+
+        buttons_layout.addWidget(change_picture_button)
+
+        save_button = QPushButton("Save Changes")
+        save_button.clicked.connect(self.save_changes)
+
+        layout.addLayout(form_layout)
+        layout.addLayout(buttons_layout)
+        layout.addWidget(save_button)
+
+        self.setLayout(layout)
+
+    def change_profile_image(self):
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select Profile Picture",
+            "",
+            "Image Files (*.png *.jpg *.jpeg)"
+        )
+
+        if not file_path:
+            return
+
+        # Copy to application directory
+        try:
+            dest_dir = os.path.join(os.getcwd(), "profile_images")
+            os.makedirs(dest_dir, exist_ok=True)
+
+            filename = f"profile_{self.user.id}_{os.path.basename(file_path)}"
+            dest_path = os.path.join(dest_dir, filename)
+
+            shutil.copyfile(file_path, dest_path)
+
+            # Update database
+            session = get_session()
+            try:
+                user = session.query(User).filter_by(id=self.user.id).first()
+                if user:
+                    user.profile_image = dest_path
+                    session.commit()
+                    QMessageBox.information(self, "Success", "Profile picture updated!")
+            except Exception as e:
+                session.rollback()
+                QMessageBox.critical(self, "Error", f"Could not update database: {str(e)}")
+            finally:
+                session.close()
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Could not copy image: {str(e)}")
+
+    def save_changes(selfself) :
+        pass
+
+def get_session():
+    return SessionLocal()
+
+
+#######START#######
 SessionLocal = sessionmaker(bind = engine)
 session = SessionLocal()
 if __name__ == "__main__":
